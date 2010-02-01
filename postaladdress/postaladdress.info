@@ -1,0 +1,6 @@
+; $Id$
+name = Postal address
+description = Test
+core = 6.x
+dependencies[] = content
+dependencies[] = text

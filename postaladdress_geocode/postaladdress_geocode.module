@@ -1,0 +1,231 @@
+<?php
+// $Id$
+
+/**
+ * Implementation of hook_field_formatter_info().
+ */
+function postaladdress_geocode_field_formatter_info() {
+  return array(
+    'geocoded' => array(
+      'label' => t('Geocoded address'),
+      'field types' => array('postaladdress'),
+      'multiple values' => CONTENT_HANDLE_CORE,
+    ),
+  );
+}
+
+function postaladdress_geocode_theme() {
+  return array(
+    'postaladdress_geocode_formatter_geocoded' => array('arguments' => array('element' => NULL)),
+  );
+}
+
+function postaladdress_google_flatten($address) {
+  if (!empty($address['flat_address'])) {
+    return $address['flat_address'];
+  }
+
+  if (isset($address['country'])) {
+    $countries = postaladdress_countries();
+    $address['country_name'] = $countries[$address['country']];
+  }
+
+  $fields = array(
+    'thoroughfare',
+    'locality',
+    'postal_code',
+    'administrative_area',
+    'country_name',
+  );
+  $fields_data = array();
+  foreach ($fields as $field) {
+    // Fetch the field from the address, if it exists.
+    if (!empty($address[$field])) {
+      $fields_data[] = $address[$field];
+    }
+  }
+  return implode(', ', $fields_data);
+}
+
+function postaladdress_geocode($address) {
+  $address_line = postaladdress_google_flatten($address);
+  $hash = sha1($address_line);
+
+  if (isset($address['data']['geocode_hash']) && $address['data']['geocode_hash'] == $hash) {
+    // This address has already been geocoded, bail out.
+    return $address;
+  }
+
+  // Try to find this address in cache.
+  $cache = cache_get('geocode:' . $hash, 'cache_postaladdress_geocode');
+  if ($cache) {
+    $data = $cache->data;
+  }
+  else {
+    $request = array(
+      'q' => $address_line,
+      'hl' => 'fr',
+      'output' => 'json',
+      'oe' => 'utf8',
+      'sensor' => 'false',
+      'key' => gmap_get_key(),
+    );
+
+    if (isset($address['country'])) {
+      $request['gl'] = $address['country'];
+    }
+    else if (isset($address['country_bias'])) {
+      $request['gl'] = $address['country_bias'];
+    }
+
+    $response = drupal_http_request('http://maps.google.com/maps/geo?' . drupal_query_string_encode($request));
+
+    usleep(200);
+    if ($response->code != 200) {
+      watchdog('Postal geocode', 'Response code %code attemping to geocode address %address.', array('%code' => $response->code, '%address' => $address_line), WATCHDOG_ERROR);
+      return $address;
+    }
+
+    // Decode the answer from Google.
+    $data = @json_decode($response->data, TRUE);
+
+    if (empty($data)) {
+      watchdog('Postal geocode', 'Invalid JSON received from Google (%data).', array('%data' => $response->data), WATCHDOG_ERROR);
+      return $address;
+    }
+
+    // Cache the response from Google.
+    cache_set('geocode:' . $hash, $data, 'cache_postaladdress_geocode', time() + 3600);
+  }
+
+  // Mark this address as geocoded now.
+  $address['data']['geocode_hash'] = $hash;
+
+  if (!isset($data['Placemark']) || !is_array($data['Placemark']) || count($data['Placemark']) == 0) {
+    watchdog('Postal geocode', 'No geocoding match (%data).', array('%data' => $response->data), WATCHDOG_ERROR);
+    return $address;
+  }
+
+  // Pick the placemark with the best accuracy.
+  $placemark = NULL;
+  foreach ($data['Placemark'] as $k => $placemark) {
+    if (!isset($best_placemark) || $placemark['AddressDetails']['Accuracy'] > $best_placemark['AddressDetails']['Accuracy']) {
+      $best_placemark = $placemark;
+    }
+  }
+
+  // Flatten the array.
+  $address_details = _postaladdress_geocode_flatten_xal($best_placemark['AddressDetails']);
+
+  // Merge details from the address.
+  $fields_accuracy = array(
+    'country' => 1,
+    'administrative_area' => 2,
+    'sub_administrative_area' => 3,
+    'locality' => 4,
+    'dependent_locality' => 4,
+    'postal_code' => 5,
+    'thoroughfare' => 8,
+    'premise' => 9,
+    'sub_premise' => 9,
+  );
+
+  foreach ($fields_accuracy as $field => $min_accuracy) {
+    if (!empty($address_details[$field]) && $best_placemark['AddressDetails']['Accuracy'] >= $min_accuracy) {
+      $address[$field] = $address_details[$field];
+    }
+  }
+
+  $address['data']['longitude'] = $best_placemark['Point']['coordinates'][0];
+  $address['data']['latitude'] = $best_placemark['Point']['coordinates'][1];
+  $address['data']['altitude'] = $best_placemark['Point']['coordinates'][2];
+
+  watchdog('Postal geocode', 'Geocoding accuracy %accuracy for address %address, result: %best_placemark (%latitude, %longitude, %altitude).', array(
+    '%accuracy' => $best_placemark['AddressDetails']['Accuracy'],
+    '%address' => $address_line,
+    '%best_placemark' => implode(', ', $address_details),
+    '%latitude' => $address['data']['latitude'],
+    '%longitude' => $address['data']['longitude'],
+    '%altitude' => $address['data']['altitude'],
+  ));
+
+  return $address;
+}
+
+function _postaladdress_geocode_flatten_xal($xal) {
+  $return = array();
+  foreach ($xal as $k => $v) {
+    if (is_array($v)) {
+      $return += _postaladdress_geocode_flatten_xal($v);
+    }
+    else if (preg_match('/^(.*)(Name|Number)$/', $k, $matches)) {
+      list(, $tag, ) = $matches;
+      // Convert CamelCase to camel_case.
+      $tag = drupal_strtolower(preg_replace('/(?<=[a-z])([A-Z])/', '_$1', $tag));
+      if ($tag != 'country') {
+        $return[$tag] = $v;
+      }
+    }
+    else if ($k == 'CountryNameCode') {
+      $return['country'] = $v;
+    }
+  }
+  return $return;
+}
+
+function theme_postaladdress_geocode_formatter_geocoded($element) {
+  postaladdress_geocode($element['#item']);
+}
+
+/**
+ * Implementation of hook_widget_info().
+ */
+function postaladdress_geocode_widget_info() {
+  return array(
+    'postaladdress_geocode_widget' => array(
+      'label' => t('Postal address (geocoded)'),
+      'field types' => array(
+        'postaladdress',
+      ),
+      'multiple values' => CONTENT_HANDLE_CORE,
+    ),
+  );
+}
+
+/**
+ * Implementation of hook_widget().
+ */
+function postaladdress_geocode_widget(&$form, &$form_state, $field, $items, $delta = 0) {
+  $element = array(
+    '#type' => 'postaladdress_widget',
+    '#default_value' => isset($items[$delta]) ? $items[$delta] : array(),
+    '#element_validate' => array('postaladdress_geocode_element_validate'),
+    '#pre_render' => array('postaladdress_geocode_widget_pre_render'),
+  );
+  return $element;
+}
+
+function postaladdress_geocode_widget_pre_render($element) {
+  if (isset($element['#value']['data']['latitude']) && isset($element['#value']['data']['longitude'])) {
+    $element['#description'] = t('Latitude: @latitude - Longitude: @longitude - Altitude: @altitude', array(
+      '@latitude' => $element['#value']['data']['latitude'],
+      '@longitude' => $element['#value']['data']['longitude'],
+      '@altitude' => $element['#value']['data']['altitude'],
+    ));
+  }
+  return $element;
+}
+
+function postaladdress_geocode_element_validate(&$element, &$form_state) {
+  // Geocode the address.
+  form_set_value($element, postaladdress_geocode($element['#value']), $form_state);
+}
+
+function postaladdress_geocode_postaladdress_presave(&$node, $field, &$items) {
+  if ($field['widget']['type'] == 'postaladdress_geocode_widget') {
+    foreach ($items as &$item) {
+      // Geocode the address.
+      $item = postaladdress_geocode($item);
+    }
+  }
+}

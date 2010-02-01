@@ -1,0 +1,34 @@
+<?php
+
+/**
+ * @file
+ * Install functions for the postal address module.
+ */
+
+/**
+ * Implementation of hook_install().
+ */
+function postaladdress_install() {
+  content_notify('install', 'postaladdress');
+}
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function postaladdress_uninstall() {
+  content_notify('uninstall', 'postaladdress');
+}
+
+/**
+ * Implementation of hook_enable().
+ */
+function postaladdress_enable() {
+  content_notify('enable', 'postaladdress');
+}
+
+/**
+ * Implementation of hook_disable().
+ */
+function postaladdress_disable() {
+  content_notify('disable', 'postaladdress');
+}

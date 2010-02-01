@@ -1,0 +1,6 @@
+; $Id$
+name = Postal address Geocode
+description = Geocode postal addresses.
+core = 6.x
+dependencies[] = postaladdress
+dependencies[] = gmap

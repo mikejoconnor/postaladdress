@@ -1,0 +1,392 @@
+<?php
+
+/**
+ * @file
+ * A simple, unbloated, module for managing postal addresses.
+ */
+
+/**
+ * Loads the functions where the classes and subclasses are defined
+ */
+function postaladdress_init() {
+  include_once drupal_get_path('module', 'postaladdress') . '/postaladdress.handlers.inc';
+}
+
+/**
+ * Implementation of hook_menu().
+ */
+function postaladdress_menu() {
+  $items['postaladdress/js'] = array(
+    'title' => 'Postal address callback',
+    'page callback' => 'postaladdress_js',
+    'page arguments' => array(),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/**
+ * Implementation of hook_elements().
+ */
+function postaladdress_elements() {
+  return array(
+    'postaladdress_widget' => array(
+      '#input' => TRUE,
+      '#process' => array('postaladdress_widget_process'),
+      '#tree' => TRUE,
+    ),
+  );
+}
+
+/**
+ * Return a form snîppet for editing an address.
+ */
+function postaladdress_edit_form(array $address) {
+  $handler = postaladdress_handler($address['country']);
+  return $handler['form callback']($address);
+}
+
+/**
+ * Substitutes the form of previous country for that of the new one//NFC why do we need the cached form here? just to get the structure of the form?
+ *
+ * @return
+ *   returns the address object
+ */
+function postaladdress_js() {
+  // Unencode and unserialize $parents.
+  $parents = array_map('urldecode', array_slice(arg(), 2));
+
+  $form_build_id = $_POST['form_build_id'];
+
+  // Get the form from the cache.
+  $cached_form = form_get_cache($form_build_id, $cached_form_state);
+
+  // We need to process the form, prepare for that by setting a few internals
+  // variables.
+  $form = $cached_form;
+  $form['#post'] = $_POST;
+  $form['#programmed'] = FALSE;//NFC Why do we need this?
+  $form_state = $cached_form_state;
+  $form_state['post'] = $_POST;
+
+  // Build the form.
+  $form = form_builder($form['form_id']['#value'], $form, $form_state);
+
+  // Select the correct target element.
+  $cached_element = &$cached_form;
+  $element = &$form;
+  foreach ($parents as $parent) {
+    $cached_element = &$cached_element[$parent];
+    $element = &$element[$parent];
+  }
+
+  $cached_element['#default_value']['country'] = $element['#value']['country'];
+
+  // Set back to the cache.
+  form_set_cache($form_build_id, $cached_form, $cached_form_state);
+
+  // Prevent duplicate wrappers.
+  unset($element['address']['#prefix'], $element['address']['#suffix']);
+
+  // Render the new output.
+  drupal_json(array('status' => TRUE, 'data' => drupal_render($element)));
+}
+
+/**
+ * The default value is defined here.
+ */
+function postaladdress_default_country() {
+  global $_domain;
+  if($_domain['domain_id'] == 913) return 'DE';
+  if($_domain['domain_id'] == 910) return 'FR';
+}
+
+/**
+ * Implementation of hook_field_info().
+ */
+function postaladdress_field_info() {
+  return array(
+    'postaladdress' => array(
+      'label' => t('Postaladdress'),
+      'description' => t('Postaladdress'),
+    ),
+  );
+}
+
+/**
+ * Implementation of hook_field().
+ */
+function postaladdress_field($op, &$node, $field, &$items, $teaser, $page) {
+  if ($op == 'load') {
+    // Unserialize the data field.
+    foreach ($items as &$item) {
+      $item['data'] = unserialize($item['data']);
+    }
+
+    $additional = module_invoke_all('postaladdress_load', $node, $field, $items);
+    if ($additional) {
+      $items = array_merge_recursive($items, $additional);
+    }
+
+    return array($field['field_name'] => $items);
+  }
+  else {
+    // Give other modules the opportunity to chime in and alter the field data.
+    foreach (module_implements('postaladdress_' . $op) as $module) {
+      $function = $module . '_postaladdress_' . $op;
+      $function($node, $field, $items, $teaser, $page);
+    }
+  }
+}
+
+/**
+ * Implementation of hook_field_settings().
+ * @param op
+ *    one of form, filters, validate, save, database columns
+ * @param field
+ *      the field we are working on
+ */
+function postaladdress_field_settings($op, $field) {
+  switch ($op) {
+    case 'database columns':
+      return postaladdress_fields();
+  }
+}
+
+/**
+ * Implementation of hook_content_is_empty().
+ */
+function postaladdress_content_is_empty($item, $field) {
+  // Remove the country.
+  unset($item['country']);
+  $item = array_filter($item);
+  return empty($item);
+}
+
+/**
+ * Implementation of hook_widget_info().
+ */
+function postaladdress_widget_info() {
+  return array(
+    'postaladdress_widget' => array(
+      'label' => t('Postal address'),
+      'field types' => array(
+        'postaladdress',
+      ),
+      'multiple values' => CONTENT_HANDLE_CORE,
+    ),
+  );
+}
+
+/**
+ * Implementation of hook_widget().
+ */
+function postaladdress_widget(&$form, &$form_state, $field, $items, $delta = 0) {
+  $element = array(
+    '#type' => $field['widget']['type'],
+    '#default_value' => isset($items[$delta]) ? $items[$delta] : array(),
+  );
+  return $element;
+}
+
+/**
+ * Creates the expanded form with address for the default country or the one we have selected.
+ *
+ * Creates the selection form for the country
+ * Wraps the address in a div so it can be modified by our ahah
+ *
+ * @param $element
+ *   The fapi element we are expanding
+ * @param $edit
+ *   The incoming POST data to populate the form element. If this is FALSE,
+ *   the element's default value should be returned.
+ * @return
+ *   The expanded form
+ */
+function postaladdress_widget_process($element, $edit = NULL) {
+  if (empty($element['#value']['country'])) {
+    $element['#value']['country'] = postaladdress_default_country();
+  }
+
+  $element['country'] = array(
+    '#type' => 'select',
+    '#title' => t('Country'),
+    '#options' => postaladdress_countries(),
+    '#required' => true,
+    '#default_value' => $element['#value']['country'],
+    '#ahah' => array(
+      'path' => 'postaladdress/js/' . implode('/', array_map('rawurlencode', $element['#array_parents'])),
+      'wrapper' => $element['#id'] . '-address-wrapper',
+    ),
+  );
+
+  $element += postaladdress_edit_form($element['#value']);
+
+  // Modify #post so that correct values are assigned to child elements.
+  if (isset($edit)) {
+    $current = &$element['#post'];
+    foreach ($element['#parents'] as $parent) {
+      $current = &$current[$parent];
+    }
+    $current = $element['#value'];
+  }
+
+  $element['#tree'] = TRUE;
+  $element['#prefix'] = '<div id="' . $element['#id'] . '-address-wrapper' . '">';
+  $element['#suffix'] = '</div>';
+
+  return $element;
+}
+
+/**
+ * Implementation of hook_field_formatter_info().
+ */
+function postaladdress_field_formatter_info() {
+  return array(
+    'default' => array(
+      'label' => t('Default'),
+      'field types' => array('postaladdress'),
+      'multiple values' => CONTENT_HANDLE_CORE,
+    ),
+  );
+}
+
+/* THEME */
+
+/**
+ * Implementation of hook_theme().
+ */
+function postaladdress_theme() {
+  $themes = array(
+    'postaladdress_widget' => array('arguments' => array('element' => NULL)),
+    'postaladdress_formatter_default' => array('arguments' => array('element' => NULL)),
+    'postaladdress' => array(
+      'template' => 'postaladdress',
+      'arguments' => array('address' => NULL),
+      'path' => drupal_get_path('module', 'postaladdress') . '/formatters',
+    ),
+  );
+  return $themes;
+}
+
+function template_preprocess_postaladdress(&$values) {
+  // Merge in defaults.
+  $values['address'] += array(
+    'country' => postaladdress_default_country(),
+    'administrative_area' => '',
+    'sub_administrative_area' => '',
+    'locality' => '',
+    'dependent_locality' => '',
+    'postal_code' => '',
+    'thoroughfare' => '',
+    'premise' => '',
+    'sub_premise' => '',
+    'data' => array(),
+  );
+
+  // Add template suggestions for this address.
+  $values['template_files'][] = 'postaladdress-' . drupal_strtolower($values['address']['country']);
+
+  // Pass the human-readable name of this address to the template.
+  $countries = postaladdress_countries();
+  $values['address']['country_name'] = $countries[$values['address']['country']];
+}
+
+/**
+ * Themes the widget.
+ */
+function theme_postaladdress_widget($element) {
+  // Unset the value that confuses theme_fieldset().
+  unset($element['#value']);
+  $element['#collapsible'] = FALSE;
+  $element['#collapsed'] = FALSE;
+  return theme('fieldset', $element);
+}
+
+/**
+ * Themes the formatter by redirecting to the specific theming function for each country.
+ */
+function theme_postaladdress_formatter_default($element) {
+  return theme('postaladdress', $element['#item']);
+}
+
+/* FUNCTIONS */
+
+/**
+ * Return the standard postal address fields.
+ */
+function postaladdress_fields() {
+  return array(
+    'country' => array(
+      'description' => 'Two letter ISO country code of this address.',
+      'type' => 'char',
+      'length' => 2,
+      'not null' => FALSE,
+      'default' => '',
+    ),
+    'administrative_area' => array(
+      'description' => 'The dministrative area of this address.',
+      'type' => 'varchar',
+      'length' => 255,
+      'default' => '',
+      'not null' => FALSE,
+    ),
+    'sub_administrative_area' => array(
+      'description' => 'The sub administrative area of this address.',
+      'type' => 'varchar',
+      'length' => 255,
+      'default' => '',
+      'not null' => FALSE,
+    ),
+    'locality' => array(
+      'description' => 'The locality of this address.',
+      'type' => 'varchar',
+      'length' => 255,
+      'default' => '',
+      'not null' => FALSE,
+    ),
+    'dependent_locality' => array(
+      'description' => 'The dependent locality of this address.',
+      'type' => 'varchar',
+      'length' => 255,
+      'default' => '',
+      'not null' => FALSE,
+    ),
+    'postal_code' => array(
+      'description' => 'The postal code of this address.',
+      'type' => 'varchar',
+      'length' => 255,
+      'default' => '',
+      'not null' => FALSE,
+    ),
+    'thoroughfare' => array(
+      'description' => 'The thoroughfare of this address.',
+      'type' => 'varchar',
+      'length' => 255,
+      'default' => '',
+      'not null' => FALSE,
+    ),
+    'premise' => array(
+      'description' => 'The premise of this address.',
+      'type' => 'varchar',
+      'length' => 255,
+      'default' => '',
+      'not null' => FALSE,
+    ),
+    'sub_premise' => array(
+      'description' => 'The sub_premise of this address.',
+      'type' => 'varchar',
+      'length' => 255,
+      'default' => '',
+      'not null' => FALSE,
+    ),
+    'data' => array(
+      'description' => 'Additional data for this address.',
+      'type' => 'text',
+      'size' => 'big',
+      'not null' => FALSE,
+      'serialize' => TRUE,
+    ),
+  );
+}
