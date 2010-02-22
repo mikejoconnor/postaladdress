@@ -1,6 +1,7 @@
-; $Id$
-name = Postal address
-description = Test
-core = 6.x
-dependencies[] = content
-dependencies[] = text
+
+name = postal address
+description = Adds an address field
+core=7.x
+
+files[] = postaladdress.module
+files[] = postaladdress.install
